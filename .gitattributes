@@ -1,0 +1,8 @@
+* text=auto
+
+# Included upstream model code -- keep the original LF bytes.
+RadioUNet/modules.py -text
+RadioUNet/LICENSE    -text
+
+*.ipynb text eol=lf
+*.npy   binary
