@@ -1,4 +1,4 @@
-﻿"""
+"""
 阶段 1：pathloss 图的自编码器（AE）重建实验。
 
 目标：
@@ -8,7 +8,9 @@
 要点：
   - 只在有效像素（mask==1，光线追踪得到的值）上计算损失与指标。
   - 输入：归一化 pl（无效像素置 0）+ 掩码通道，让网络知道哪些像素无效。
-  - 归一化范围使用 metadata.json 中 pathloss_range_db_per_band[band]（只用训练集推导的边界）。
+  - 归一化范围默认使用 metadata.json 中全局 pathloss_range_db（[20.0, 228.0]，跨度 208 dB），
+    与官方基线 lunar_dataset.py / train.py / train_wandb.py 保持完全一致
+    （可通过 --norm-range per_band 切换为 pathloss_range_db_per_band[band]）。
   - 不使用高程图、Tx 位置，不做几何条件（属于阶段 2/3）。
   - 只写新文件，不修改 train.py；不删除任何文件。
   - W&B（第 2 版补丁）：默认离线记录（--wandb-mode offline），本地 run 目录在 <out>/wandb 下，
@@ -105,6 +107,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--band", default="415", choices=["415", "58"])
+    ap.add_argument("--norm-range", default="global", choices=["global", "per_band"],
+                    help="默认 global 使用 metadata.json 的 pathloss_range_db ([20.0, 228.0])，与基线 lunar_dataset.py 一致；"
+                         "per_band 使用 pathloss_range_db_per_band[band]")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--lr", type=float, default=2e-4)
@@ -128,7 +133,10 @@ def main():
 
     with open(os.path.join(a.root, "metadata.json"), encoding="utf-8") as f:
         meta = json.load(f)
-    lo, hi = meta["pathloss_range_db_per_band"][a.band]
+    if a.norm_range == "global":
+        lo, hi = meta["pathloss_range_db"]
+    else:
+        lo, hi = meta["pathloss_range_db_per_band"][a.band]
 
     tr = PLReconDataset(a.root, "train", a.band, lo, hi)
     va = PLReconDataset(a.root, "val", a.band, lo, hi)
@@ -142,7 +150,7 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, a.epochs))
     scaler = torch.amp.GradScaler(enabled=(dev.type == "cuda"))
 
-    print(f"band={a.band} dB range=[{lo},{hi}] train={len(tr)} val={len(va)} "
+    print(f"band={a.band} norm_range={a.norm_range} dB range=[{lo},{hi}] train={len(tr)} val={len(va)} "
           f"params={n_params:,} device={dev}")
 
     wb_run = None
@@ -211,7 +219,7 @@ def main():
         if val_rmse_db < best:
             best = val_rmse_db
             torch.save({"model": model.state_dict(), "args": vars(a), "lo": lo, "hi": hi,
-                        "epoch": ep, "val_rmse_db": val_rmse_db}, best_path)
+                        "norm_range": a.norm_range, "epoch": ep, "val_rmse_db": val_rmse_db}, best_path)
             print(f"  new best {val_rmse_db:.3f} dB -> {best_path}")
 
     with open(hist_path, "w", newline="", encoding="utf-8") as f:
@@ -220,6 +228,7 @@ def main():
         w.writerows(rows)
     with open(sum_path, "w", encoding="utf-8") as f:
         json.dump({"best_val_rmse_db": best, "params": n_params, "config": vars(a),
+                   "dB_lo": lo, "dB_hi": hi, "norm_range": a.norm_range,
                    "latent_shape": [a.latent_ch, 32, 32], "compression_ratio": 256 * 256 / (a.latent_ch * 32 * 32)},
                   f, ensure_ascii=False, indent=2)
     if wb_run is not None:
